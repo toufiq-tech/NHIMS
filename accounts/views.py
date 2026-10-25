@@ -5356,7 +5356,25 @@ def accountant_dashboard(request):
             total_payments = pay_qs.filter(status='paid').aggregate(t=Sum('amount'))['t'] or Decimal('0')
             today_payments = pay_qs.filter(status='paid', created_at__date=today).aggregate(t=Sum('amount'))['t'] or Decimal('0')
             month_income = pay_qs.filter(status='paid', created_at__date__gte=month_start).aggregate(t=Sum('amount'))['t'] or Decimal('0')
-            recent_payments = pay_qs.order_by('-created_at')[:5]
+            recent_payments = list(pay_qs.order_by('-created_at')[:5])
+        except Exception:
+            recent_payments = []
+
+        # PaymentRecord (includes pharmacy customer sales)
+        try:
+            from .models import PaymentRecord
+            payment_record_qs = PaymentRecord.objects.filter(hospital=hospital)
+            total_payment_records = payment_record_qs.filter(status='completed').aggregate(t=Sum('amount'))['t'] or Decimal('0')
+            today_payment_records = payment_record_qs.filter(status='completed', payment_date=today).aggregate(t=Sum('amount'))['t'] or Decimal('0')
+            month_payment_records = payment_record_qs.filter(status='completed', payment_date__gte=month_start).aggregate(t=Sum('amount'))['t'] or Decimal('0')
+
+            total_payments += total_payment_records
+            today_payments += today_payment_records
+            month_income += month_payment_records
+
+            recent_payment_records = payment_record_qs.order_by('-created_at')[:5]
+            recent_payments.extend(recent_payment_records)
+            recent_payments = sorted(recent_payments, key=lambda x: getattr(x, 'created_at', x.payment_date), reverse=True)[:5]
         except Exception:
             pass
 
@@ -5825,16 +5843,52 @@ def accountant_medicine_sales(request):
     if request.user.role != 'accountant':
         return redirect('dashboard')
 
-    from .models import MedicineOrder
+    from .models import MedicineOrder, CustomerMedicineSale
     hospital = request.user.hospital
-    orders = MedicineOrder.objects.filter(
+
+    medicine_orders = MedicineOrder.objects.filter(
         hospital=hospital,
         status='sold',
     ).select_related('medicine', 'patient_user', 'payment')
-    total = orders.aggregate(total=Sum('total'))['total'] or Decimal('0')
+
+    customer_sales = CustomerMedicineSale.objects.filter(
+        hospital=hospital,
+    ).select_related('medicine', 'sold_by', 'payment_record')
+
+    all_sales = []
+    for order in medicine_orders:
+        all_sales.append({
+            'type': 'order',
+            'buyer': order.patient_user.get_full_name() or order.patient_user.username if order.patient_user else 'Unknown',
+            'medicine': order.medicine.name,
+            'quantity': order.quantity,
+            'total': order.total,
+            'payment_method': order.payment.get_method_display() if order.payment else 'Cash',
+            'transaction_id': order.payment.transaction_id if order.payment else None,
+            'date': order.created_at,
+            'created_at': order.created_at,
+        })
+
+    for sale in customer_sales:
+        all_sales.append({
+            'type': 'sale',
+            'buyer': sale.customer_name,
+            'medicine': sale.medicine.name,
+            'quantity': sale.quantity,
+            'total': sale.total,
+            'payment_method': sale.payment_method.capitalize() if sale.payment_method else 'Cash',
+            'transaction_id': sale.payment_record.payment_no if sale.payment_record else None,
+            'date': sale.sale_date,
+            'created_at': sale.sale_date,
+        })
+
+    all_sales.sort(key=lambda x: x['created_at'], reverse=True)
+
+    total = sum(sale['total'] for sale in all_sales)
+
     return render(request, 'accounts/accountant/medicine_sales.html', {
         'hospital': hospital,
-        'orders': orders,
+        'orders': all_sales,
         'total': total,
     })
 
@@ -6755,16 +6809,73 @@ def pharmacy_medicine_orders(request):
     if request.user.role != 'pharmacy':
         return redirect('dashboard')
 
-    from .models import MedicineOrder
+    from .models import MedicineOrder, CustomerMedicineSale
     hospital = request.user.hospital
 
     if request.method == 'POST':
+        action = request.POST.get('action')
+
+        if action == 'customer_sale':
+            from .models import PaymentRecord
+            medicine_id = request.POST.get('medicine_id')
+            customer_name = request.POST.get('customer_name', '').strip()
+            customer_phone = request.POST.get('customer_phone', '').strip()
+            quantity = int(request.POST.get('quantity', 1))
+            payment_method = request.POST.get('payment_method', 'cash')
+            notes = request.POST.get('notes', '').strip()
+
+            if not medicine_id or not customer_name:
+                messages.error(request, 'Please select a medicine and provide customer name.')
+                return redirect('pharmacy_medicine_orders')
+
+            with transaction.atomic():
+                medicine = Medicine.objects.select_for_update().get(id=medicine_id, hospital=hospital)
+                if quantity > medicine.stock:
+                    messages.error(request, 'Insufficient stock available.')
+                    return redirect('pharmacy_medicine_orders')
+
+                unit_price = medicine.price
+                total = unit_price * quantity
+
+                medicine.stock -= quantity
+                medicine.save(update_fields=['stock', 'updated_at'])
+
+                customer_sale = CustomerMedicineSale.objects.create(
+                    hospital=hospital,
+                    medicine=medicine,
+                    customer_name=customer_name,
+                    customer_phone=customer_phone,
+                    quantity=quantity,
+                    unit_price=unit_price,
+                    total=total,
+                    payment_method=payment_method,
+                    notes=notes,
+                    sold_by=request.user,
+                )
+
+                payment_record = PaymentRecord.objects.create(
+                    hospital=hospital,
+                    patient_name=customer_name,
+                    patient_phone=customer_phone,
+                    amount=total,
+                    method=payment_method,
+                    status='completed',
+                    notes=f'Customer sale - {medicine.name} x{quantity}',
+                    payment_date=timezone.now().date(),
+                    received_by=request.user,
+                )
+
+                customer_sale.payment_record = payment_record
+                customer_sale.save(update_fields=['payment_record'])
+
+                messages.success(request, f'Sale completed. Total: ৳{total:.2f} - Payment recorded for accountant.')
+            return redirect('pharmacy_medicine_orders')
+
         order = get_object_or_404(
             MedicineOrder.objects.select_related('medicine'),
             id=request.POST.get('order_id'),
             hospital=hospital,
         )
-        action = request.POST.get('action')
         if action == 'approve' and order.status == 'pending':
             if order.quantity > order.medicine.stock:
                 messages.error(request, 'This request cannot be approved because stock is insufficient.')
@@ -6797,9 +6908,48 @@ def pharmacy_medicine_orders(request):
     orders = MedicineOrder.objects.filter(hospital=hospital).select_related(
         'medicine', 'patient_user', 'payment', 'approved_by', 'sold_by'
     )
+    customer_sales = CustomerMedicineSale.objects.filter(hospital=hospital).select_related(
+        'medicine', 'sold_by', 'payment_record'
+    )
+    medicines = Medicine.objects.filter(hospital=hospital, stock__gt=0)
+
+    all_orders = []
+    for order in orders:
+        all_orders.append({
+            'type': 'order',
+            'obj': order,
+            'buyer': order.patient_user.get_full_name() or order.patient_user.username if order.patient_user else 'Unknown',
+            'medicine': order.medicine,
+            'stock': order.medicine.stock,
+            'quantity': order.quantity,
+            'total': order.total,
+            'payment': order.payment.get_status_display() if order.payment else None,
+            'status': order.status,
+            'id': order.id,
+            'is_customer_sale': False,
+        })
+    for sale in customer_sales:
+        all_orders.append({
+            'type': 'sale',
+            'obj': sale,
+            'buyer': sale.customer_name,
+            'medicine': sale.medicine,
+            'stock': sale.medicine.stock,
+            'quantity': sale.quantity,
+            'total': sale.total,
+            'payment': sale.payment_method.capitalize() if sale.payment_method else 'Cash',
+            'status': 'sold',
+            'id': sale.id,
+            'is_customer_sale': True,
+            'customer_phone': sale.customer_phone,
+        })
+
+    all_orders.sort(key=lambda x: x['obj'].created_at if hasattr(x['obj'], 'created_at') else x['obj'].sale_date, reverse=True)
+
     return render(request, 'accounts/pharmacy/medicine_orders.html', {
         'hospital': hospital,
-        'orders': orders,
+        'orders': all_orders,
+        'medicines': medicines,
     })
 
 

@@ -73,41 +73,45 @@
                 {% for order in orders %}
                 <tr>
                     <td>
-                        {% if order.is_customer_sale or not order.patient_user_id %}
-                            <strong>{{ order.customer_name|default:"Walk-in" }}</strong>
+                        {% if order.is_customer_sale %}
+                            <strong>{{ order.buyer }}</strong>
                             {% if order.customer_phone %}<br><span style="color:#64748b;font-size:.75rem">{{ order.customer_phone }}</span>{% endif %}
                             <span class="badge-customer">Customer</span>
                         {% else %}
-                            {{ order.patient_user.get_full_name|default:order.patient_user.username }}
+                            {{ order.buyer }}
                         {% endif %}
                     </td>
                     <td>{{ order.medicine.name }}</td>
-                    <td>{{ order.medicine.stock }}</td>
+                    <td>{{ order.stock }}</td>
                     <td>{{ order.quantity }}</td>
                     <td>৳{{ order.total }}</td>
                     <td>
                         {% if order.payment %}
-                            {{ order.payment.get_status_display }}
+                            {{ order.payment }}
                         {% elif order.is_customer_sale %}
-                            Cash / Paid
+                            {{ order.payment }}
                         {% else %}
                             —
                         {% endif %}
                     </td>
-                    <td><span class="order-status {{ order.status }}">{{ order.get_status_display }}</span></td>
+                    <td><span class="order-status {{ order.status }}">{{ order.status|title }}</span></td>
                     <td>
-                        {% if order.status == 'pending' %}
-                        <form method="post" style="display:inline">{% csrf_token %}
-                            <input type="hidden" name="order_id" value="{{ order.id }}">
-                            <button class="action approve" name="action" value="approve">Approve</button>
-                            <button class="action reject" name="action" value="reject">Reject</button>
-                        </form>
-                        {% elif order.status == 'approved' %}
-                        <form method="post">{% csrf_token %}
-                            <input type="hidden" name="order_id" value="{{ order.id }}">
-                            <button class="action sell" name="action" value="sell">Mark Sold</button>
-                        </form>
-                        {% else %}—{% endif %}
+                        {% if not order.is_customer_sale %}
+                            {% if order.status == 'pending' %}
+                            <form method="post" style="display:inline">{% csrf_token %}
+                                <input type="hidden" name="order_id" value="{{ order.id }}">
+                                <button class="action approve" name="action" value="approve">Approve</button>
+                                <button class="action reject" name="action" value="reject">Reject</button>
+                            </form>
+                            {% elif order.status == 'approved' %}
+                            <form method="post">{% csrf_token %}
+                                <input type="hidden" name="order_id" value="{{ order.id }}">
+                                <button class="action sell" name="action" value="sell">Mark Sold</button>
+                            </form>
+                            {% else %}—{% endif %}
+                        {% else %}
+                            —
+                        {% endif %}
                     </td>
                 </tr>
                 {% empty %}

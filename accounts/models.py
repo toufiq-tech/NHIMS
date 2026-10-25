@@ -1777,15 +1777,12 @@ patient_user = models.ForeignKey(
     on_delete=models.CASCADE,
     related_name='medicine_orders',
     null=True,
-    blank=True,          # now optional
+    blank=True,
 )
 customer_name = models.CharField(max_length=150, blank=True)
 customer_phone = models.CharField(max_length=30, blank=True)
 is_customer_sale = models.BooleanField(default=False)
-# optional link if you have PaymentRecord
-payment_record = models.ForeignKey(
-    'PaymentRecord',
-    on_delete=models.SET_NULL,
-    null=True, blank=True,
-    related_name='medicine_orders',
-)
+def buyer_display(self):
+    if self.is_customer_sale or not self.patient_user_id:
+        return self.customer_name or 'Walk-in Customer'
+    return self.patient_user.get_full_name() or self.patient_user.username
